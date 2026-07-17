@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="HealthFit - Your AI-powered health & fitness companion. Track BMI, calories, workouts, and get smart meal analysis." />
+    <meta name="keywords" content="health, fitness, BMI, calories, workout, AI meal analysis" />
+    <title>HealthFit — AI Health & Fitness Tracker</title>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet" />
+    <!-- Theme: apply saved preference before render to prevent flash of wrong theme -->
+    <script>
+      (function(){
+        var t = localStorage.getItem('theme');
+        // Default to dark if no preference saved
+        if (t !== 'light') document.documentElement.classList.add('dark');
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

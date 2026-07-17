@@ -1,0 +1,131 @@
+# Debugging & Fixing Health App — Root Cause Analysis + Fix Plan
+
+## Root Cause Analysis (Completed)
+
+### Bug 1 — EDAMAM_APP_KEY has whitespace in `.env` (CRITICAL)
+**File:** `server/.env` line 44  
+```
+EDAMAM_APP_KEY= 36ec14328ae1de0be13f3f8364720c7e	
+```
+There is a **leading space** and a **trailing tab character** in the value. `process.env.EDAMAM_APP_KEY` evaluates to `" 36ec14...e\t"` — non-empty so the `if (!appKey)` guard passes, but the API call fails with a 401/403 auth error. The catch block returns the **static 150 kcal fallback** for every non-Indian food lookup.
+
+### Bug 2 — GEMINI_API_KEY is the placeholder string (CRITICAL)
+**File:** `server/.env` line 32  
+```
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+`aiAnalyzer.js` line 22 explicitly checks for this placeholder and drops into an offline fallback. All AI chat goes to the dumb fallback branch. UI shows **"Fallback AI"**.
+
+### Bug 3 — Fallback passes entire sentence as ONE food query (CRITICAL — explains 85 kcal bug)
+**File:** `server/utils/aiAnalyzer.js` lines 24–40  
+When Gemini is absent, the code does:
+```js
+const results = await searchFood(message)  // message = "I ate 3 chapatis, 1 bowl dal, 100g curd"
+```
+This sends the **entire sentence** as a single food query. Then:
+- `parseQuery("I ate 3 chapatis, 1 bowl dal, 100g curd")` — doesn't start with a digit, returns `{ qty: 1, food: "i ate 3 chapatis, 1 bowl dal, 100g curd" }`
+- The loop over `INDIAN_FOOD_UNITS` finds `"chapati"` inside the food string → returns 1 × 85 = **85 kcal**
+- Only `results[0]` is used — dal and curd are completely ignored
+
+### Bug 4 — `parseQuery` can't handle natural language quantities (CRITICAL)
+**File:** `server/utils/nutritionApi.js` line 25  
+Regex: `/^([\d.]+)\s*(piece|bowl|cup|g|kg|serving|plate|slice)?\s+(.+)$/i`  
+Input: `"3 chapatis"` — matches `qty=3`, `unit=undefined`, `food="chapatis"`.  
+Then checking `INDIAN_FOOD_UNITS`: `"chapatis".includes("chapati")` → **true**, works.  
+BUT: `"1 bowl dal"` → `qty=1`, `unit="bowl"`, `food="dal"` → works.  
+**Real issue:** the function is never called with split foods in the fallback — the full sentence bypass is the root cause (Bug 3). However plurals like "chapatis" do work via `includes()`. The parsing is adequate once we split properly.
+
+### Bug 5 — Gemini fallback only returns `results[0]` not all foods
+**File:** `server/utils/aiAnalyzer.js` line 29  
+```js
+totalCalories: results[0].calories  // Only first food! Others discarded.
+```
+Even if `searchFood` returned multiple results (it doesn't — it returns results for one item), only index 0 is used.
+
+### Bug 6 — Edamam Nutrition Analysis API called with wrong endpoint
+**File:** `server/utils/nutritionApi.js` line 8  
+```
+EDAMAM_BASE_URL = "https://api.edamam.com/api/nutrition-data"
+```
+The **Nutrition Analysis API** (`nutrition-data`) requires a full ingredient text and returns totals. But the app has a **Nutrition Database / Food Search App ID & Key** (`d564f7ee`). These are **two different Edamam products** with different credentials. The `nutrition-data` endpoint will reject `d564f7ee` credentials with 401. The correct endpoint for this App ID is `https://api.edamam.com/api/food-database/v2/parser`.
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> **Gemini API Key is missing.** The key in `.env` is the placeholder `your_gemini_api_key_here`. You must replace it with a real key from [Google AI Studio](https://aistudio.google.com/) (free, no credit card). Without it, I will implement a high-quality multi-food fallback that works without Gemini, but the chat will not be conversational.
+> 
+> **Do you have a Gemini API key to provide?** If yes, share it and I'll add it. If no, I'll make the fallback production-quality.
+
+> [!WARNING]
+> **Edamam credential mismatch.** The App ID `d564f7ee` is for the **Edamam Food Database API** (food search / parser), NOT the Nutrition Analysis API. The current code calls `nutrition-data` which is a different product. I will switch to the correct `food-database/v2/parser` endpoint to match the credentials in your `.env`.
+
+---
+
+## Proposed Changes
+
+### Fix 1 — server/.env (whitespace bug)
+
+#### [MODIFY] `.env`
+- Remove leading space and trailing tab from `EDAMAM_APP_KEY`
+
+---
+
+### Fix 2 — Edamam integration (wrong endpoint + wrong parsing)
+
+#### [MODIFY] [nutritionApi.js](file:///c:/Users/vishal%20kathpal/OneDrive%20-%20Graphic%20Era%20University/Desktop/fs/server/utils/nutritionApi.js)
+- Switch from `nutrition-data` (Nutrition Analysis API) to `food-database/v2/parser` (Food Database API) — matching the actual App ID credentials
+- Fix response parsing to match the Food Database API's JSON structure
+- Add better quantity/unit extraction from `parseQuery` for edge cases
+- Trim API key whitespace in code as a safety net: `process.env.EDAMAM_APP_KEY?.trim()`
+
+---
+
+### Fix 3 — AI Analyzer fallback (multi-food parsing without Gemini)
+
+#### [MODIFY] [aiAnalyzer.js](file:///c:/Users/vishal%20kathpal/OneDrive%20-%20Graphic%20Era%20University/Desktop/fs/server/utils/aiAnalyzer.js)
+- Rewrite the no-Gemini fallback to:
+  1. Split the message by commas and conjunctions (`and`, `with`, `+`)
+  2. For each segment, extract quantity + food name using regex
+  3. Call `searchFood()` for each food item separately
+  4. Aggregate all results into a proper multi-food response (sum all calories, protein, carbs, fat)
+- Fix the `results[0].calories` bug — use sum of all detected foods
+- Improve the Gemini path: strip markdown fences more robustly before `JSON.parse`
+- Add `GEMINI_API_KEY?.trim()` check so a key with accidental spaces still works
+
+---
+
+### Fix 4 — AI Controller (chat endpoint response)
+
+#### [MODIFY] [aiController.js](file:///c:/Users/vishal%20kathpal/OneDrive%20-%20Graphic%20Era%20University/Desktop/fs/server/controllers/aiController.js)
+- The chat endpoint currently returns the raw `ChatRecord` DB document. The frontend expects `{ message, type, data }`. Ensure the response shape is consistent regardless of Gemini vs fallback mode.
+- When meal intent detected via chat, auto-save to `MealEntry` (currently this is only done in `analyzeMeal` endpoint, not the `chat` endpoint — but `AIChat.jsx` calls `aiApi.analyzeMeal` in the background which covers it). No change needed here; leaving as-is.
+
+---
+
+### Fix 5 — AIChat.jsx (UI polish, no logic changes)
+
+#### [MODIFY] [AIChat.jsx](file:///c:/Users/vishal%20kathpal/OneDrive%20-%20Graphic%20Era%20University/Desktop/fs/client/src/pages/AIChat.jsx)
+- Show cleaner "AI Provider" status badge (currently shows "Fallback AI" in yellow — will become green when Gemini key is added)
+- Add a notice in the UI when in fallback mode so users understand behavior
+- No structural changes
+
+---
+
+## Verification Plan
+
+### After fixes:
+1. Restart backend server (`npm run dev` in server/)
+2. Test meal: `"I ate 3 chapatis, 1 bowl dal, 100g curd"` → expected ≈ **560 kcal** (255 + 150 + 155)
+3. Test Edamam food search: `GET /api/calories/search-food?q=chicken breast` → should return real data, not fallback 150 kcal
+4. Test AI chat with general question → should respond conversationally (if Gemini key provided) or give a helpful static response
+5. Check AI status badge → should show green "Edamam Nutrition API" when key is clean
+
+### Expected calorie breakdown for "3 chapatis, 1 bowl dal, 100g curd":
+| Food | Qty | Expected kcal |
+|------|-----|--------------|
+| Chapati | 3 pieces | 3 × 85 = 255 |
+| Dal | 1 bowl | 150 |
+| Curd | ~0.67 bowl (100g ≈ 100/150 bowls) | ~67 |
+| **Total** | | **~472 kcal** |
